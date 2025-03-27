@@ -3,56 +3,64 @@
 
 #include <thread>
 #include <functional>
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include "channel.hpp"
 
-// визначення типу Job (як функція без параметрів))
+// тип Job як функція без параметрів, що повертає void
 using Job = std::function<void()>;
 
+// конструктор класу Worker, що приймає: id, channel, backChannel
+// worker надсилає інформацію про час очікування завдання через спільний вказівник на канал для зворотного зв'язку
 class Worker {
 public:
-
-    // приймає ідентифікатор робітника та спільний вказівник на Channel, що має завдання
-    Worker(size_t id, std::shared_ptr<Channel<Job>> channel)
-        : id(id), channel(channel), thread(&Worker::run, this)
+    Worker(size_t id,
+           std::shared_ptr<Channel<Job>> channel,
+           std::shared_ptr<Channel<std::pair<size_t, uint64_t>>> backChannel)
+        : id(id), channel(channel), backChannel(backChannel), thread(&Worker::run, this)
     {
     }
 
-    // метод для приєднання (join) потоку для його завершення
+    // метод join(), дозволяє основному потоку чекати завершення роботи цього worker'а
     void join() {
         if (thread.joinable())
             thread.join();
     }
 
-    // метод для від'єднання потоку, якщо необхідно
+    // метод detach() від'єднує потік worker'а, дозволяючи йому працювати незалежно
     void detach() {
         if (thread.joinable())
             thread.detach();
     }
 
 private:
-    size_t id; // ідентифікатор робітника
-    std::shared_ptr<Channel<Job>> channel; // спільний вказівник на канал із завданнями
-    std::thread thread; // потік, в якому працює робітник
+    size_t id; // унікальний ідентифікатор worker'а
+    std::shared_ptr<Channel<Job>> channel; // спільний вказівник на канал завдань
+    std::shared_ptr<Channel<std::pair<size_t, uint64_t>>> backChannel; // канал для зворотного зв'язку (id, час очікування)
+    std::thread thread; // потік, в якому працює worker
 
-
-    // метод, який запускається у потоці і постійно очікує завдання з каналу для виконання
+    // метод run() отримує завдання з каналу, вимірює час очікування, виконує завдання
+    // потім надсилає статистику (ідентифікатор і час очікування) через backChannel
     void run() {
         while (true) {
+            auto start_time = std::chrono::steady_clock::now();
 
             // отримання завдання з каналу (блокується, якщо черга порожня)
             Job job = channel->receive();
+            auto wait_time = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start_time).count();
 
-            // якщо отримане завдання (false) - це сигнал до зупинки робітника
+            // якщо отримане завдання порожнє -> зупинка роботи worker'а
             if (!job) {
                 std::cout << "Worker " << id << " was told to stop." << std::endl;
                 break;
             }
 
-            // логування факту отримання завдання та його виконання
             std::cout << "Worker " << id << " got a job; executing." << std::endl;
             job();
+
+            backChannel->send(std::make_pair(id, static_cast<uint64_t>(wait_time)));
         }
     }
 };
